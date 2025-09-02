@@ -1,0 +1,150 @@
+name: Story Completion Workflow
+
+on:
+  push:
+    branches:
+      - 'story-*'
+  pull_request:
+    branches: [ main, develop ]
+    types: [ opened, synchronize, reopened ]
+
+jobs:
+  story-validation:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Extract Story Number
+      id: story
+      run: |
+        BRANCH_NAME=${GITHUB_HEAD_REF:-${GITHUB_REF#refs/heads/}}
+        if [[ $BRANCH_NAME =~ story-([0-9]+\.[0-9]+) ]]; then
+          STORY_NUM=${BASH_REMATCH[1]}
+          echo "story_number=$STORY_NUM" >> $GITHUB_OUTPUT
+          echo "Story detected: $STORY_NUM"
+        else
+          echo "No story number detected in branch name"
+          exit 1
+        fi
+
+    - name: Use Node.js 20.x
+      uses: actions/setup-node@v4
+      with:
+        node-version: 20.x
+        cache: 'npm'
+
+    - name: Install dependencies
+      run: npm ci && cd apps/web && npm ci
+
+    - name: Run Story-Specific Tests
+      run: |
+        STORY_NUM="${{ steps.story.outputs.story_number }}"
+        echo "Running tests for Story $STORY_NUM"
+        
+        case $STORY_NUM in
+          "1.1")
+            npm run test:story -- t3-stack.test.tsx
+            ;;
+          "1.2")
+            npm run test:story -- nextauth.test.tsx
+            ;;
+          "1.3")
+            npm run test:story -- publisher-management.test.tsx
+            ;;
+          "1.4")
+            npm run test:story -- analytics-dashboard.test.tsx
+            ;;
+          "1.5")
+            npm run test:story -- branding.test.tsx
+            ;;
+          "2.1")
+            npm run test:story -- submission.test.tsx
+            ;;
+          *)
+            echo "Running all integration tests for story $STORY_NUM"
+            npm run test:integration
+            ;;
+        esac
+
+    - name: Validate Story Documentation
+      run: |
+        STORY_NUM="${{ steps.story.outputs.story_number }}"
+        STORY_FILE="docs/stories/$STORY_NUM.*.md"
+        
+        if ls $STORY_FILE 1> /dev/null 2>&1; then
+          echo "✅ Story documentation found"
+          # Check if story is marked as complete
+          if grep -q "Status.*Complete" $STORY_FILE; then
+            echo "✅ Story marked as complete in documentation"
+          else
+            echo "❌ Story not marked as complete in documentation"
+            exit 1
+          fi
+        else
+          echo "❌ Story documentation not found: $STORY_FILE"
+          exit 1
+        fi
+
+    - name: Validate Acceptance Criteria
+      run: |
+        echo "Validating acceptance criteria completion..."
+        STORY_NUM="${{ steps.story.outputs.story_number }}"
+        STORY_FILE="docs/stories/$STORY_NUM.*.md"
+        
+        # Count completed tasks (marked with [x])
+        COMPLETED=$(grep -c "^\s*- \[x\]" $STORY_FILE || true)
+        TOTAL=$(grep -c "^\s*- \[\(x\| \)\]" $STORY_FILE || true)
+        
+        echo "Completed tasks: $COMPLETED/$TOTAL"
+        
+        if [ "$COMPLETED" -eq "$TOTAL" ] && [ "$TOTAL" -gt 0 ]; then
+          echo "✅ All acceptance criteria completed"
+        else
+          echo "❌ Not all acceptance criteria completed ($COMPLETED/$TOTAL)"
+          exit 1
+        fi
+
+    - name: Run Full QA Suite
+      run: |
+        echo "Running comprehensive QA validation..."
+        npm run lint
+        npm run type-check
+        npm test
+        npm run test:integration
+        npm run build
+
+    - name: Generate Story Completion Report
+      run: |
+        STORY_NUM="${{ steps.story.outputs.story_number }}"
+        echo "# Story $STORY_NUM Completion Report" > story-completion-report.md
+        echo "Generated on: $(date)" >> story-completion-report.md
+        echo "" >> story-completion-report.md
+        echo "## Validation Results" >> story-completion-report.md
+        echo "- ✅ Story-specific tests passed" >> story-completion-report.md
+        echo "- ✅ Documentation validated" >> story-completion-report.md
+        echo "- ✅ Acceptance criteria completed" >> story-completion-report.md
+        echo "- ✅ Full QA suite passed" >> story-completion-report.md
+        echo "" >> story-completion-report.md
+        echo "## Next Steps" >> story-completion-report.md
+        echo "- Ready for code review" >> story-completion-report.md
+        echo "- Ready for merge to main branch" >> story-completion-report.md
+
+    - name: Upload Completion Report
+      uses: actions/upload-artifact@v3
+      with:
+        name: story-completion-report
+        path: story-completion-report.md
+
+  auto-merge-story:
+    runs-on: ubuntu-latest
+    needs: story-validation
+    if: github.event_name == 'pull_request' && contains(github.head_ref, 'story-')
+    
+    steps:
+    - name: Auto-merge completed story
+      uses: pascalgn/merge-action@v0.15.6
+      with:
+        github_token: ${{ secrets.GITHUB_TOKEN }}
+        merge_method: squash
+        merge_commit_message: "feat: complete story {pull_request_title}"
